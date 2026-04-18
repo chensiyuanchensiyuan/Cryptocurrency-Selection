@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Data directories (large files)
+futures_data/
+futures_data_1m/
+futures_data_1m_forward/
+funding_rates/
+funding_rates_forward/
+factors/
+
+# Claude Code memory (private)
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.log
+.DS_Store
+
+# Temporary output
+output1/
