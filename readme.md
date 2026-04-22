@@ -27,13 +27,20 @@
 
 ![策略表现](./output/strategy_performance.png)
 
-### 样本外表现
+### 验证集表现（2025-07 ~ 2025-12）
 
-![样本外表现](./output/out_of_sample_performance.png)
+![验证集表现](./output/out_of_sample_performance.png)
 
-**样本划分：**
-- **样本内 (In-Sample)**：2022-01-01 ~ 2025-06-30（用于因子筛选优化）
-- **样本外 (Out-of-Sample)**：2025-07-01 ~ 2025-12-31（用于验证）
+### 前向测试表现（2026-01 ~ 2026-02）
+
+![前向测试表现](./output/forward_test_performance.png)
+
+使用 `forward_test.py` 从1分钟K线实时计算8个日内因子，完全复用主策略回测引擎（相同参数、相同资金费率干预），无任何回溯优化。
+
+**三段式样本划分（严格不可回溯）：**
+- **训练集 (Train)**：2022-01-01 ~ 2025-06-30 — 因子挖掘、筛选、组合优化
+- **验证集 (Validation)**：2025-07-01 ~ 2025-12-31 — 超参数寻优（资金费率惩罚系数、窗口等）
+- **测试集 (Test)**：2026-01-01 ~ 2026-02-28 — 纯观察，不参与任何选择
 
 ---
 
@@ -119,6 +126,42 @@ impact = impact_coef × daily_volatility × sqrt(participation_rate)
 
 ---
 
+## 资金费率管理
+
+加密永续合约存在资金费率结算机制：多头持仓在资金费率为正时需付费，空头持仓在资金费率为负时需付费。策略通过两层机制主动管理这一成本。
+
+### 两层干预机制
+
+**Layer 1 — 信号调整（避免高费率仓位）**
+
+在生成做多/做空排名之前，对因子信号做惩罚调整：
+
+```python
+adjusted_signal = signal - penalty × expected_rate
+```
+
+- `expected_rate > 0`（预期多头付费）→ 信号降低 → 排名下降 → 减少多头暴露
+- `expected_rate < 0`（预期空头付费）→ 信号升高 → 排名上升 → 减少空头暴露
+- `expected_rate` 使用历史已实现资金费率的 EWM 加权均值估算（shift(1) 严格防止未来泄露）
+
+**Layer 2 — 实际费率扣除**
+
+回测引擎按每次结算时间（8h/4h/1h 周期）和实际持仓方向，逐笔扣减已实现资金费率成本。
+
+### 参数设置
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `COST_ADJ_PENALTY` | 200 | 惩罚系数（验证集寻优） |
+| `COST_ADJ_WINDOW` | 14 | EWM span（天） |
+| `COST_ADJ_METHOD` | ewm | 指数加权移动平均 |
+
+### 开关设计
+
+`ENABLE_COST`（交易成本）和 `ENABLE_FUNDING`（资金费率干预）是两个独立开关，互不影响。Before/After Trading Cost 对比仅差交易成本；资金费率干预对两者同等生效。
+
+---
+
 ## 因子研究流程
 
 ### 1. 因子挖掘
@@ -188,7 +231,7 @@ impact = impact_coef × daily_volatility × sqrt(participation_rate)
 4. 迭代500次
 
 #### 样本外验证
-选定因子后，在样本外期间（2025-07-01 ~ 2025-12-31）独立回测，评估策略稳定性。
+选定因子后，在验证集（2025-07-01 ~ 2025-12-31）独立回测评估稳定性，在测试集（2026-01~02）做最终纯前向观察。
 
 ---
 
@@ -430,47 +473,45 @@ T+2日 00:00  → 根据T+1日因子调仓，以 open[T+2] 平仓
 ## 文件结构
 
 ```
-├── crypto_strategy.py       # 核心策略模块
-│   ├── FACTOR_CONFIG        # 因子配置（其他脚本自动读取）
-│   ├── 因子加载器
-│   ├── 因子分析器
-│   ├── 回测引擎（带交易成本）
-│   └── 数据加载函数
+├── crypto_strategy.py         # 核心策略模块
+│   ├── FACTOR_CONFIG          # 因子配置（其他脚本自动读取）
+│   ├── Backtester             # 回测引擎（交易成本 + 资金费率扣除）
+│   ├── precompute_funding_costs          # Layer 2: 实际资金费率扣除
+│   ├── precompute_expected_funding_rate  # Layer 1: 预期费率信号调整
+│   └── zscore / daily_winsorize          # 工具函数（供其他模块导入）
 │
-├── crypto_visualization.py  # 可视化与执行脚本
-│   ├── 图表生成函数
+├── crypto_visualization.py    # 主回测执行 + 图表生成
+│   ├── 全样本 / 验证集回测
 │   ├── 市场指数计算
-│   ├── 样本外回测
-│   └── 主执行逻辑
+│   └── 多图表输出
 │
-├── factor_selection.py      # 因子筛选优化脚本
-│   ├── 样本内/样本外数据划分
-│   ├── 带交易成本的回测
-│   ├── 贪心+启发式搜索
-│   ├── 模拟退火优化
-│   └── 样本外验证
+├── factor_selection.py        # 因子组合优化（训练集）
+│   ├── 贪心算法初始化
+│   ├── 模拟退火（500次迭代）
+│   └── 验证集独立评估
 │
-├── volume_analysis.py       # 流动性分层归因分析
-│   ├── 自动读取FACTOR_CONFIG
-│   ├── 按quote_volume分5档
-│   └── 各档位独立策略回测
+├── factor_screening.py        # 单因子 IC / Sharpe 筛选
 │
-├── factors/                 # 预计算因子值文件
-│   ├── daily_factors.csv
-│   └── intraday_factors.csv
+├── factor_mining.py           # 137个候选因子定义
 │
-├── futures_data/            # 日频价格数据
-│   └── *.csv
+├── forward_test.py            # 前向测试（2026-01~02）
+│   ├── 从1m K线实时计算8个日内因子
+│   └── 复用 Backtester + 资金费率干预
 │
-├── futures_data_1m/         # 分钟频价格数据
-│   └── *.parquet
+├── download_forward_data.py   # 下载前向测试所需的1m数据
 │
-└── output/                  # 输出图表
+├── data_fetch.py              # 历史数据下载工具
+│
+├── screening_results/         # 因子筛选结果（CSV）
+│   ├── qualified_factors.csv
+│   ├── all_factor_results.csv
+│   ├── daily_winsorize_thresholds.csv
+│   └── funding_intervention_scan.csv  # 资金费率惩罚参数扫描结果
+│
+└── output/                    # 输出图表
     ├── strategy_performance.png
-    ├── out_of_sample_performance.png  # 样本外净值曲线
-    ├── tradeable_universe_heatmap.png # 实际交易标的热力图
-    ├── factor_correlation.png
+    ├── out_of_sample_performance.png
+    ├── forward_test_performance.png
     ├── monthly_returns.png
-    ├── factor_analysis.png
     └── vip_aum_comparison.png
 ```
